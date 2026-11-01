@@ -12,9 +12,12 @@ st.set_page_config(
 )
 
 st.title("📈 MarketStrength Master Dashboard")
+st.caption("Indian Market | Nifty 500 | Sector Rotation | Relative Strength")
 st.caption("Indian Market | Nifty 500 | Sector Rotation | Stage Analysis")
 
 st.warning(
+    "Yahoo Finance data may be delayed, incomplete or rate-limited. "
+    "This dashboard is for research, not automatic trading."
     "Historical Yahoo Finance data may be delayed, incomplete or rate-limited. "
     "Signals are research classifications, not investment advice."
 )
@@ -33,6 +36,9 @@ SECTOR_INDICES = {
     "Nifty Media": "^CNXMEDIA",
     "Nifty PSU Bank": "^CNXPSUBANK",
     "Nifty Financial Services": "^CNXFIN",
+    "Nifty Healthcare": "^CNXHEALTHCARE",
+    "Nifty Oil & Gas": "^CNXENERGY",
+    "Nifty Consumer Durables": "^CNXCONSUMERDURABLES"
     "Nifty Healthcare": "^CNXHEALTHCARE"
 }
 
@@ -75,6 +81,7 @@ def get_nifty500():
         (c for c in df.columns if c.lower() == "symbol"),
         None
     )
+
     sector_col = next(
         (c for c in df.columns if c.lower() == "industry"),
         None
@@ -84,9 +91,11 @@ def get_nifty500():
         raise ValueError("Nifty 500 Symbol column not found.")
 
     if sector_col is None:
+        raise ValueError("Nifty 500 Industry column not found.")
         df["Industry"] = "Not available"
         sector_col = "Industry"
 
+    df = df[[symbol_col, sector_col]].dropna()
     df = df[[symbol_col, sector_col]].dropna(subset=[symbol_col])
     df.columns = ["Symbol", "Sector"]
 
@@ -98,9 +107,12 @@ def get_nifty500():
 # ---------- PRICE DOWNLOAD ----------
 
 @st.cache_data(ttl=3600, show_spinner=False)
+def download_prices(tickers):
 def download_prices(tickers, period="2y", interval="1d"):
     data = yf.download(
         list(tickers),
+        period="2y",
+        interval="1d",
         period=period,
         interval=interval,
         auto_adjust=True,
@@ -138,10 +150,16 @@ def calculate_returns(series):
         "12M": 252
     }
 
+    result = {}
+
+    for label, days in periods.items():
+        result[label] = (
     return {
         period: (
             series.iloc[-1] / series.iloc[-days] - 1
         ) * 100
+
+    return result
         for period, days in periods.items()
     }
 
@@ -235,6 +253,11 @@ def run_sector_scanner():
 
     output = pd.DataFrame(results)
 
+    rs = output["3M RS vs Nifty"]
+    momentum = output["RS Momentum"]
+
+    rs_mid = rs.median()
+    momentum_mid = momentum.median()
     rs_mid = output["3M RS vs Nifty"].median()
     momentum_mid = output["RS Momentum"].median()
 
@@ -355,8 +378,16 @@ elif menu == "Sector Rotation":
             sectors = run_sector_scanner()
 
         if sectors.empty:
+            st.error(
+                "Sector data unavailable. Some Yahoo Finance index "
+                "symbols may not be supported."
+            )
             st.error("Sector data unavailable. Please try again later.")
         else:
+            st.success(
+                f"Sector analysis completed for {len(sectors)} indices."
+            )
+
             counts = sectors["Rotation Stage"].value_counts()
 
             c1, c2, c3, c4 = st.columns(4)
@@ -365,12 +396,14 @@ elif menu == "Sector Rotation":
             c3.metric("Weakening", counts.get("Weakening", 0))
             c4.metric("Lagging", counts.get("Lagging", 0))
 
+            st.subheader("Sector Rotation Rankings")
             styled = sectors.style.map(
                 colour_rotation,
                 subset=["Rotation Stage"]
             )
 
             st.dataframe(
+                sectors,
                 styled,
                 use_container_width=True,
                 hide_index=True
@@ -519,7 +552,10 @@ elif menu == "Stage Analysis":
 else:
     st.header("MarketStrength Master Dashboard")
 
+    st.write("Your Indian market analysis workspace.")
+
     st.markdown("""
+    **Analysis workflow**
     ### Analysis workflow
 
     1. Market Trend
@@ -540,6 +576,8 @@ else:
     """)
 
     st.info(
+        "Use the Sector Rotation and Nifty 500 Scanner pages "
+        "to run the current analysis."
         "Run Sector Rotation, Nifty 500 Scanner and Stage Analysis "
         "from the sidebar to view the current research results."
     )
@@ -547,3 +585,4 @@ else:
 st.caption(
     "MarketStrength Master Dashboard | Historical data research tool"
 )
+
