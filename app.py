@@ -3,6 +3,8 @@ import streamlit as st
 import pandas as pd
 import yfinance as yf
 from datetime import datetime
+import io
+import requests
 
 st.set_page_config(
     page_title="MarketStrength Master Dashboard",
@@ -25,20 +27,38 @@ st.sidebar.info(
     "Signals are educational screening results, not investment advice."
 )
 
-# Basic stock universe
-INDIAN_STOCKS = {
-    "RELIANCE": "Reliance Industries",
-    "TCS": "Tata Consultancy Services",
-    "HDFCBANK": "HDFC Bank",
-    "ICICIBANK": "ICICI Bank",
-    "BHARTIARTL": "Bharti Airtel",
-    "INFY": "Infosys",
-    "LT": "Larsen & Toubro",
-    "SUNPHARMA": "Sun Pharmaceutical",
-    "BEL": "Bharat Electronics",
-    "TRENT": "Trent"
-}
 
+# NIFTY 500 UNIVERSE
+@st.cache_data(ttl=86400, show_spinner=False)
+def get_nifty500():
+    url = "https://www.niftyindices.com/IndexConstituent/ind_nifty500list.csv"
+
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "text/csv,*/*"
+    }
+
+    response = requests.get(url, headers=headers, timeout=30)
+    response.raise_for_status()
+
+    df = pd.read_csv(io.BytesIO(response.content))
+    df.columns = df.columns.str.strip()
+
+    if "Symbol" not in df.columns:
+        raise ValueError("Nifty 500 CSV does not contain a Symbol column.")
+
+    company_column = (
+        "Company Name" if "Company Name" in df.columns else "Symbol"
+    )
+
+    df = df.dropna(subset=["Symbol"])
+
+    return dict(zip(
+        df["Symbol"].astype(str).str.strip(),
+        df[company_column].astype(str).str.strip()
+    ))
+
+# Other starter universes
 US_STOCKS = {
     "AAPL": "Apple",
     "MSFT": "Microsoft",
@@ -65,14 +85,23 @@ GLOBAL_ETFS = {
     "AGAC.L": "Global Aggregate Bond ETF"
 }
 
+# Select market universe
 if market == "India":
-    assets = INDIAN_STOCKS
+    try:
+        assets = get_nifty500()
+        st.sidebar.success(f"Nifty 500 loaded: {len(assets)} stocks")
+    except Exception as error:
+        assets = {}
+        st.sidebar.error("Could not download Nifty 500 list.")
+        st.sidebar.caption(str(error))
+
 elif market == "United States":
     assets = US_STOCKS
 elif market == "Indian ETFs":
     assets = INDIAN_ETFS
 else:
     assets = GLOBAL_ETFS
+
 
 # Sidebar pages
 page = st.sidebar.radio(
