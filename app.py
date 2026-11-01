@@ -3,7 +3,8 @@ import streamlit as st
 import pandas as pd
 import yfinance as yf
 from datetime import datetime
-
+import io
+import requests
 st.set_page_config(
     page_title="MarketStrength Master Dashboard",
     page_icon="📈",
@@ -26,18 +27,39 @@ st.sidebar.info(
 )
 
 # Basic stock universe
-INDIAN_STOCKS = {
-    "RELIANCE": "Reliance Industries",
-    "TCS": "Tata Consultancy Services",
-    "HDFCBANK": "HDFC Bank",
-    "ICICIBANK": "ICICI Bank",
-    "BHARTIARTL": "Bharti Airtel",
-    "INFY": "Infosys",
-    "LT": "Larsen & Toubro",
-    "SUNPHARMA": "Sun Pharmaceutical",
-    "BEL": "Bharat Electronics",
-    "TRENT": "Trent"
-}
+
+# NIFTY 500 UNIVERSE
+@st.cache_data(ttl=86400, show_spinner=False)
+def get_nifty500():
+    url = "https://www.niftyindices.com/IndexConstituent/ind_nifty500list.csv"
+
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "text/csv,*/*"
+    }
+
+    response = requests.get(url, headers=headers, timeout=30)
+    response.raise_for_status()
+
+    df = pd.read_csv(io.BytesIO(response.content))
+    df.columns = df.columns.str.strip()
+
+    if "Symbol" not in df.columns:
+        raise ValueError("Nifty 500 CSV does not contain a Symbol column.")
+
+    company_column = (
+        "Company Name" if "Company Name" in df.columns else "Symbol"
+    )
+
+    df = df.dropna(subset=["Symbol"])
+
+    return dict(zip(
+        df["Symbol"].astype(str).str.strip(),
+        df[company_column].astype(str).str.strip()
+    ))
+
+INDIAN_STOCKS = get_nifty500()
+
 
 US_STOCKS = {
     "AAPL": "Apple",
