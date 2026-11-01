@@ -2,7 +2,8 @@
 import streamlit as st
 import pandas as pd
 import yfinance as yf
-from datetime import datetime
+import requests
+from io import StringIO
 
 st.set_page_config(
     page_title="MarketStrength Master Dashboard",
@@ -11,159 +12,214 @@ st.set_page_config(
 )
 
 st.title("📈 MarketStrength Master Dashboard")
-st.caption("Indian Market | Relative Strength | Stage Analysis")
+st.caption("Indian Stocks | Nifty 500 | Relative Strength")
 
 st.warning(
-    "Prototype data: Yahoo Finance prices may be delayed, incomplete "
-    "or rate-limited. This is not a live trading signal."
+    "Yahoo Finance data may be delayed, incomplete or rate-limited. "
+    "This dashboard is for research, not automatic trading."
 )
 
-# Initial Indian stock universe
-DEFAULT_STOCKS = [
-    "RELIANCE", "TCS", "HDFCBANK", "ICICIBANK",
-    "INFY", "BHARTIARTL", "ITC", "LT",
-    "SBIN", "AXISBANK", "BAJFINANCE", "MARUTI",
-    "SUNPHARMA", "TITAN", "TRENT", "BEL",
-    "HAL", "ADANIPORTS", "ULTRACEMCO", "NTPC"
-]
-
 BENCHMARK = "^NSEI"
+
+@st.cache_data(ttl=86400)
+def get_nifty500():
+    url = "https://www.niftyindices.com/IndexConstituent/ind_nifty500list.csv"
+
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "text/csv,*/*"
+    }
+
+    response = requests.get(url, headers=headers, timeout=30)
+    response.raise_for_status()
+
+    df = pd.read_csv(StringIO(response.text))
+    df.columns = df.columns.str.strip()
+
+    symbol_col = next(
+        (c for c in df.columns if c.lower() == "symbol"),
+        None
+    )
+
+    if symbol_col is None:
+        raise ValueError("Symbol column not found in Nifty 500 file.")
+
+    symbols = (
+        df[symbol_col]
+        .dropna()
+        .astype(str)
+        .str.strip()
+        .str.upper()
+        .unique()
+        .tolist()
+    )
+
+    return symbols
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def download_prices(symbols):
     tickers = [s + ".NS" for s in symbols] + [BENCHMARK]
+
     data = yf.download(
         tickers,
         period="2y",
         interval="1d",
         auto_adjust=True,
         progress=False,
-        threads=True
+        threads=True,
+        group_by="column"
     )
 
     if data.empty:
         return pd.DataFrame()
 
     if isinstance(data.columns, pd.MultiIndex):
+        if "Close" not in data.columns.get_level_values(0):
+            return pd.DataFrame()
         close = data["Close"]
     else:
+        if "Close" not in data.columns:
+            return pd.DataFrame()
         close = data[["Close"]]
 
     return close.dropna(axis=1, how="all")
 
-def calculate_rs(prices, ticker):
-    if ticker not in prices.columns:
-        return None
+def calculate_returns(series):
+    series = series.dropna()
 
-    series = prices[ticker].dropna()
     if len(series) < 253:
         return None
 
-    current = series.iloc[-1]
-    periods = {"1M": 21, "3M": 63, "6M": 126, "12M": 252}
-
-    return {
-        period: round((current / series.iloc[-days] - 1) * 100, 2)
-        for period, days in periods.items()
+    periods = {
+        "1M Return %": 21,
+        "3M Return %": 63,
+        "6M Return %": 126,
+        "12M Return %": 252
     }
+
+    result = {}
+
+    for label, days in periods.items():
+        result[label] = round(
+            (series.iloc[-1] / series.iloc[-days] - 1) * 100,
+            2
+        )
+
+    return result
+
+@st.cache_data(ttl=3600)
+def run_scanner(symbols):
+    prices = download_prices(tuple(symbols))
+
+    if prices.empty or BENCHMARK not in prices.columns:
+        return pd.DataFrame()
+
+    benchmark = calculate_returns(prices[BENCHMARK])
+
+    if benchmark is None:
+        return pd.DataFrame()
+
+    results = []
+
+    for symbol in symbols:
+        ticker = symbol + ".NS"
+
+        if ticker not in prices.columns:
+            continue
+
+        returns = calculate_returns(prices[ticker])
+
+        if returns is None:
+            continue
+
+        row = {"Symbol": symbol}
+        row.update(returns)
+
+        for period, days in [
+            ("1M", 21),
+            ("3M", 63),
+            ("6M", 126),
+            ("12M", 252)
+        ]:
+            stock_return = row[period + " Return %"]
+            benchmark_return = benchmark[period + " Return %"]
+
+            row[period + " RS vs Nifty"] = round(
+                stock_return - benchmark_return, 2
+            )
+
+        results.append(row)
+
+    if not results:
+        return pd.DataFrame()
+
+    output = pd.DataFrame(results)
+
+    output = output.sort_values(
+        "3M RS vs Nifty",
+        ascending=False
+    ).reset_index(drop=True)
+
+    output.insert(0, "Rank", range(1, len(output) + 1))
+
+    return output
 
 menu = st.sidebar.selectbox(
     "Dashboard Sections",
     [
         "Master Dashboard",
+        "Nifty 500 Scanner",
         "Relative Strength",
-        "Stock Scanner",
         "Import Data"
     ]
 )
 
 if menu == "Import Data":
-    st.header("Import Your Own Stock Data")
+    st.header("Import Your Own Data")
+
     uploaded = st.file_uploader("Upload CSV", type=["csv"])
 
     if uploaded:
         df = pd.read_csv(uploaded)
         st.dataframe(df, use_container_width=True)
 
-elif menu in ["Master Dashboard", "Relative Strength", "Stock Scanner"]:
+else:
+    st.header("Nifty 500 Relative Strength Scanner")
 
-    st.header("Indian Stock Relative Strength")
-
-    custom_symbols = st.text_input(
-        "Stock symbols (comma separated)",
-        value=",".join(DEFAULT_STOCKS)
+    st.write(
+        "Automatically loads the Nifty 500 stock universe "
+        "and ranks stocks by relative strength."
     )
 
-    symbols = list(dict.fromkeys(
-        s.strip().upper()
-        for s in custom_symbols.split(",")
-        if s.strip()
-    ))
+    if st.button("Load Nifty 500 & Run Scanner", type="primary"):
 
-    if st.button("Refresh Indian Market Data", type="primary"):
-        with st.spinner("Downloading historical prices..."):
-            prices = download_prices(tuple(symbols))
+        try:
+            with st.spinner("Loading official Nifty 500 stock list..."):
+                symbols = get_nifty500()
 
-        if prices.empty:
-            st.error(
-                "No price data received. Please try again later."
+            st.success(
+                f"Loaded {len(symbols)} Nifty 500 constituents."
             )
-        else:
-            benchmark_data = prices.get(BENCHMARK)
 
-            results = []
+            with st.spinner(
+                "Downloading historical prices and calculating RS. "
+                "This may take several minutes..."
+            ):
+                output = run_scanner(tuple(symbols))
 
-            for symbol in symbols:
-                ticker = symbol + ".NS"
-                rs = calculate_rs(prices, ticker)
-
-                if rs is None or benchmark_data is None:
-                    continue
-
-                benchmark_series = benchmark_data.dropna()
-
-                if len(benchmark_series) < 253:
-                    continue
-
-                row = {
-                    "Symbol": symbol,
-                    "1M Return %": rs["1M"],
-                    "3M Return %": rs["3M"],
-                    "6M Return %": rs["6M"],
-                    "12M Return %": rs["12M"],
-                    "1M Benchmark %": round(
-                        (benchmark_series.iloc[-1] /
-                         benchmark_series.iloc[-21] - 1) * 100, 2
-                    ),
-                    "3M Benchmark %": round(
-                        (benchmark_series.iloc[-1] /
-                         benchmark_series.iloc[-63] - 1) * 100, 2
-                    ),
-                    "6M Benchmark %": round(
-                        (benchmark_series.iloc[-1] /
-                         benchmark_series.iloc[-126] - 1) * 100, 2
-                    ),
-                    "12M Benchmark %": round(
-                        (benchmark_series.iloc[-1] /
-                         benchmark_series.iloc[-252] - 1) * 100, 2
-                    )
-                }
-
-                row["RS 3M vs Nifty"] = round(
-                    row["3M Return %"] - row["3M Benchmark %"], 2
+            if output.empty:
+                st.error(
+                    "No usable price data was returned. "
+                    "Please try again later."
                 )
-
-                results.append(row)
-
-            if results:
-                output = pd.DataFrame(results)
-                output = output.sort_values(
-                    "RS 3M vs Nifty", ascending=False
-                )
-
+            else:
                 st.success(
-                    f"Analysis completed for {len(output)} stocks."
+                    f"Scanner completed: {len(output)} stocks analysed."
                 )
+
+                st.metric("Stocks Analysed", len(output))
+
+                st.subheader("Strongest Stocks")
 
                 st.dataframe(
                     output,
@@ -174,18 +230,17 @@ elif menu in ["Master Dashboard", "Relative Strength", "Stock Scanner"]:
                 csv = output.to_csv(index=False).encode("utf-8")
 
                 st.download_button(
-                    "Download RS Results CSV",
+                    "Download Nifty 500 RS Results",
                     data=csv,
-                    file_name="Indian_Stock_RS.csv",
+                    file_name="Nifty500_RS_Results.csv",
                     mime="text/csv"
                 )
-            else:
-                st.warning(
-                    "Insufficient historical data or unavailable symbols."
-                )
+
+        except Exception as error:
+            st.error("Scanner could not complete.")
+            st.code(str(error))
 
     st.caption(
-        "Benchmark: Nifty 50. RS figures are historical price returns; "
-        "they are not forecasts or recommendations."
+        "Benchmark: Nifty 50 (^NSEI). Rankings use historical "
+        "price returns and are not investment recommendations."
     )
-
