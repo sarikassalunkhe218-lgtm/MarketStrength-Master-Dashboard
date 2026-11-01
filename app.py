@@ -2,8 +2,7 @@
 import streamlit as st
 import pandas as pd
 import yfinance as yf
-import requests
-from io import StringIO
+from datetime import datetime
 
 st.set_page_config(
     page_title="MarketStrength Master Dashboard",
@@ -12,538 +11,293 @@ st.set_page_config(
 )
 
 st.title("📈 MarketStrength Master Dashboard")
-st.caption("Indian Market | Nifty 500 | Sector Rotation | Stage Analysis")
+st.caption("Indian and Global Markets | Relative Strength | Stage Analysis")
 
-st.warning(
-    "Historical Yahoo Finance data may be delayed, incomplete or rate-limited. "
-    "Signals are research classifications, not investment advice."
+# Sidebar
+st.sidebar.header("Market Settings")
+market = st.sidebar.selectbox(
+    "Select Market",
+    ["India", "United States", "Global ETFs", "Indian ETFs"]
 )
 
-BENCHMARK = "^NSEI"
+st.sidebar.info(
+    "This dashboard uses downloaded market data or your own CSV file. "
+    "Signals are educational screening results, not investment advice."
+)
 
-SECTOR_INDICES = {
-    "Nifty Bank": "^NSEBANK",
-    "Nifty IT": "^CNXIT",
-    "Nifty Pharma": "^CNXPHARMA",
-    "Nifty Auto": "^CNXAUTO",
-    "Nifty FMCG": "^CNXFMCG",
-    "Nifty Metal": "^CNXMETAL",
-    "Nifty Realty": "^CNXREALTY",
-    "Nifty Energy": "^CNXENERGY",
-    "Nifty Media": "^CNXMEDIA",
-    "Nifty PSU Bank": "^CNXPSUBANK",
-    "Nifty Financial Services": "^CNXFIN",
-    "Nifty Healthcare": "^CNXHEALTHCARE"
+# Basic stock universe
+INDIAN_STOCKS = {
+    "RELIANCE": "Reliance Industries",
+    "TCS": "Tata Consultancy Services",
+    "HDFCBANK": "HDFC Bank",
+    "ICICIBANK": "ICICI Bank",
+    "BHARTIARTL": "Bharti Airtel",
+    "INFY": "Infosys",
+    "LT": "Larsen & Toubro",
+    "SUNPHARMA": "Sun Pharmaceutical",
+    "BEL": "Bharat Electronics",
+    "TRENT": "Trent"
 }
 
-# ---------- COLOUR FORMATTING ----------
-
-STAGE_COLORS = {
-    "Stage 1 - Basing": "background-color: #FFF2CC; color: #7F6000",
-    "Stage 2 - Advancing": "background-color: #D9EAD3; color: #274E13",
-    "Stage 3 - Topping": "background-color: #FCE4D6; color: #984807",
-    "Stage 4 - Declining": "background-color: #F4CCCC; color: #990000"
+US_STOCKS = {
+    "AAPL": "Apple",
+    "MSFT": "Microsoft",
+    "NVDA": "NVIDIA",
+    "AMZN": "Amazon",
+    "GOOGL": "Alphabet",
+    "META": "Meta Platforms",
+    "AVGO": "Broadcom",
+    "LLY": "Eli Lilly",
+    "JPM": "JPMorgan Chase",
+    "COST": "Costco"
 }
 
-ROTATION_COLORS = {
-    "Leading": "background-color: #D9EAD3; color: #274E13",
-    "Improving": "background-color: #D9EAF7; color: #073763",
-    "Weakening": "background-color: #FCE4D6; color: #984807",
-    "Lagging": "background-color: #F4CCCC; color: #990000"
+INDIAN_ETFS = {
+    "NIFTYBEES.NS": "Nifty 50 ETF",
+    "JUNIORBEES.NS": "Nifty Next 50 ETF",
+    "MONQ50.NS": "MONQ50 ETF",
+    "GOLDBEES.NS": "Gold ETF"
 }
 
-def colour_stage(value):
-    return STAGE_COLORS.get(value, "")
-
-def colour_rotation(value):
-    return ROTATION_COLORS.get(value, "")
-
-# ---------- NIFTY 500 UNIVERSE ----------
-
-@st.cache_data(ttl=86400)
-def get_nifty500():
-    url = "https://www.niftyindices.com/IndexConstituent/ind_nifty500list.csv"
-    headers = {"User-Agent": "Mozilla/5.0"}
-
-    response = requests.get(url, headers=headers, timeout=30)
-    response.raise_for_status()
-
-    df = pd.read_csv(StringIO(response.text))
-    df.columns = df.columns.str.strip()
-
-    symbol_col = next(
-        (c for c in df.columns if c.lower() == "symbol"),
-        None
-    )
-    sector_col = next(
-        (c for c in df.columns if c.lower() == "industry"),
-        None
-    )
-
-    if symbol_col is None:
-        raise ValueError("Nifty 500 Symbol column not found.")
-
-    if sector_col is None:
-        df["Industry"] = "Not available"
-        sector_col = "Industry"
-
-    df = df[[symbol_col, sector_col]].dropna(subset=[symbol_col])
-    df.columns = ["Symbol", "Sector"]
-
-    df["Symbol"] = df["Symbol"].astype(str).str.strip().str.upper()
-    df["Sector"] = df["Sector"].astype(str).str.strip()
-
-    return df
-
-# ---------- PRICE DOWNLOAD ----------
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def download_prices(tickers, period="2y", interval="1d"):
-    data = yf.download(
-        list(tickers),
-        period=period,
-        interval=interval,
-        auto_adjust=True,
-        progress=False,
-        threads=True,
-        group_by="column"
-    )
-
-    if data.empty:
-        return pd.DataFrame()
-
-    if isinstance(data.columns, pd.MultiIndex):
-        if "Close" not in data.columns.get_level_values(0):
-            return pd.DataFrame()
-        close = data["Close"]
-    else:
-        if "Close" not in data.columns:
-            return pd.DataFrame()
-        close = data[["Close"]]
-
-    return close.dropna(axis=1, how="all")
-
-# ---------- RELATIVE STRENGTH ----------
-
-def calculate_returns(series):
-    series = series.dropna()
-
-    if len(series) < 253:
-        return None
-
-    periods = {
-        "1M": 21,
-        "3M": 63,
-        "6M": 126,
-        "12M": 252
-    }
-
-    return {
-        period: (
-            series.iloc[-1] / series.iloc[-days] - 1
-        ) * 100
-        for period, days in periods.items()
-    }
-
-@st.cache_data(ttl=3600)
-def run_stock_scanner(symbols):
-    tickers = [s + ".NS" for s in symbols] + [BENCHMARK]
-    prices = download_prices(tuple(tickers))
-
-    if prices.empty or BENCHMARK not in prices.columns:
-        return pd.DataFrame()
-
-    benchmark = calculate_returns(prices[BENCHMARK])
-
-    if benchmark is None:
-        return pd.DataFrame()
-
-    results = []
-
-    for symbol in symbols:
-        ticker = symbol + ".NS"
-
-        if ticker not in prices.columns:
-            continue
-
-        returns = calculate_returns(prices[ticker])
-
-        if returns is None:
-            continue
-
-        row = {"Symbol": symbol}
-
-        for period in ["1M", "3M", "6M", "12M"]:
-            row[period + " Return %"] = round(returns[period], 2)
-            row[period + " RS vs Nifty"] = round(
-                returns[period] - benchmark[period], 2
-            )
-
-        results.append(row)
-
-    if not results:
-        return pd.DataFrame()
-
-    output = pd.DataFrame(results)
-
-    return output.sort_values(
-        "3M RS vs Nifty", ascending=False
-    ).reset_index(drop=True)
-
-# ---------- SECTOR ROTATION ----------
-
-@st.cache_data(ttl=3600)
-def run_sector_scanner():
-    tickers = list(set(SECTOR_INDICES.values()) | {BENCHMARK})
-    prices = download_prices(tuple(tickers))
-
-    if prices.empty or BENCHMARK not in prices.columns:
-        return pd.DataFrame()
-
-    benchmark = calculate_returns(prices[BENCHMARK])
-
-    if benchmark is None:
-        return pd.DataFrame()
-
-    results = []
-
-    for sector, ticker in SECTOR_INDICES.items():
-        if ticker not in prices.columns:
-            continue
-
-        returns = calculate_returns(prices[ticker])
-
-        if returns is None:
-            continue
-
-        row = {"Sector": sector}
-
-        for period in ["1M", "3M", "6M", "12M"]:
-            row[period + " Return %"] = round(returns[period], 2)
-            row[period + " RS vs Nifty"] = round(
-                returns[period] - benchmark[period], 2
-            )
-
-        row["RS Momentum"] = round(
-            row["3M RS vs Nifty"] - row["6M RS vs Nifty"], 2
-        )
-
-        results.append(row)
-
-    if not results:
-        return pd.DataFrame()
-
-    output = pd.DataFrame(results)
-
-    rs_mid = output["3M RS vs Nifty"].median()
-    momentum_mid = output["RS Momentum"].median()
-
-    def classify(row):
-        strong = row["3M RS vs Nifty"] >= rs_mid
-        improving = row["RS Momentum"] >= momentum_mid
-
-        if strong and improving:
-            return "Leading"
-        if not strong and improving:
-            return "Improving"
-        if strong and not improving:
-            return "Weakening"
-        return "Lagging"
-
-    output["Rotation Stage"] = output.apply(classify, axis=1)
-
-    return output.sort_values(
-        "3M RS vs Nifty", ascending=False
-    ).reset_index(drop=True)
-
-# ---------- WEINSTEIN STAGE ANALYSIS ----------
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def run_stage_scanner(symbols):
-    tickers = [symbol + ".NS" for symbol in symbols]
-
-    weekly = download_prices(
-        tuple(tickers),
-        period="5y",
-        interval="1wk"
-    )
-
-    if weekly.empty:
-        return pd.DataFrame()
-
-    results = []
-
-    for symbol in symbols:
-        ticker = symbol + ".NS"
-
-        if ticker not in weekly.columns:
-            continue
-
-        prices = weekly[ticker].dropna()
-
-        if len(prices) < 40:
-            continue
-
-        ma30 = prices.rolling(30).mean().dropna()
-
-        if len(ma30) < 5:
-            continue
-
-        current_price = prices.iloc[-1]
-        current_ma = ma30.iloc[-1]
-        previous_ma = ma30.iloc[-5]
-
-        slope_pct = (
-            (current_ma / previous_ma) - 1
-        ) * 100
-
-        distance_pct = (
-            (current_price / current_ma) - 1
-        ) * 100
-
-        if current_price > current_ma and slope_pct > 0:
-            stage = "Stage 2 - Advancing"
-        elif current_price < current_ma and slope_pct < 0:
-            stage = "Stage 4 - Declining"
-        elif current_price > current_ma and slope_pct <= 0:
-            stage = "Stage 3 - Topping"
-        else:
-            stage = "Stage 1 - Basing"
-
-        results.append({
-            "Symbol": symbol,
-            "Last Price": round(float(current_price), 2),
-            "30-Week MA": round(float(current_ma), 2),
-            "Price vs MA %": round(float(distance_pct), 2),
-            "MA Slope % (4 weeks)": round(float(slope_pct), 2),
-            "Stage": stage
-        })
-
-    return pd.DataFrame(results)
-
-# ---------- SIDEBAR ----------
-
-menu = st.sidebar.selectbox(
-    "Dashboard Sections",
+GLOBAL_ETFS = {
+    "VWRA.L": "Vanguard FTSE All-World ETF",
+    "CSPX.L": "iShares Core S&P 500 ETF",
+    "AGAC.L": "Global Aggregate Bond ETF"
+}
+
+if market == "India":
+    assets = INDIAN_STOCKS
+elif market == "United States":
+    assets = US_STOCKS
+elif market == "Indian ETFs":
+    assets = INDIAN_ETFS
+else:
+    assets = GLOBAL_ETFS
+
+# Sidebar pages
+page = st.sidebar.radio(
+    "Dashboard Section",
     [
         "Master Dashboard",
         "Sector Rotation",
-        "Nifty 500 Scanner",
+        "Stock Scanner",
         "Stage Analysis",
-        "Import Data"
+        "Fundamentals / Import Data"
     ]
 )
 
-# ---------- IMPORT DATA ----------
+@st.cache_data(ttl=1800, show_spinner=False)
+def get_prices(tickers):
+    data = yf.download(
+        tickers=list(tickers),
+        period="2y",
+        interval="1d",
+        auto_adjust=True,
+        progress=False,
+        group_by="ticker",
+        threads=True
+    )
+    return data
 
-if menu == "Import Data":
-    st.header("Import Your Own Data")
-    uploaded = st.file_uploader("Upload CSV", type=["csv"])
-
-    if uploaded:
-        df = pd.read_csv(uploaded)
-        st.dataframe(df, use_container_width=True)
-
-# ---------- SECTOR ROTATION PAGE ----------
-
-elif menu == "Sector Rotation":
-    st.header("NSE Sector Rotation")
-    st.caption("Green = Leading | Blue = Improving | Orange = Weakening | Red = Lagging")
-
-    if st.button("Run Sector Rotation", type="primary"):
-        with st.spinner("Downloading sector index data..."):
-            sectors = run_sector_scanner()
-
-        if sectors.empty:
-            st.error("Sector data unavailable. Please try again later.")
+def extract_close(data, ticker):
+    try:
+        if isinstance(data.columns, pd.MultiIndex):
+            close = data[ticker]["Close"]
         else:
-            counts = sectors["Rotation Stage"].value_counts()
+            close = data["Close"]
+        if isinstance(close, pd.DataFrame):
+            close = close.iloc[:, 0]
+        return close.dropna()
+    except Exception:
+        return pd.Series(dtype=float)
 
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Leading", counts.get("Leading", 0))
-            c2.metric("Improving", counts.get("Improving", 0))
-            c3.metric("Weakening", counts.get("Weakening", 0))
-            c4.metric("Lagging", counts.get("Lagging", 0))
+def stage_label(close):
+    if len(close) < 160:
+        return "Insufficient Data"
+    ma30 = close.rolling(150).mean()
+    current = close.iloc[-1]
+    average = ma30.iloc[-1]
+    previous = ma30.iloc[-20]
+    if current > average and average > previous:
+        return "Stage 2"
+    if current < average and average < previous:
+        return "Stage 4"
+    if current > average and average <= previous:
+        return "Stage 3"
+    return "Stage 1"
 
-            styled = sectors.style.map(
-                colour_rotation,
-                subset=["Rotation Stage"]
+def build_market_table(assets, market_name):
+    tickers = list(assets.keys())
+    if not tickers:
+        return pd.DataFrame()
+
+    yf_tickers = [
+        t if t.endswith(".NS") or "." in t or market_name == "United States"
+        else t + ".NS"
+        for t in tickers
+    ]
+
+    with st.spinner("Downloading market prices. Please wait..."):
+        prices = get_prices(tuple(yf_tickers))
+
+    rows = []
+    for original, ticker in zip(tickers, yf_tickers):
+        close = extract_close(prices, ticker)
+        if close.empty:
+            continue
+
+        last = float(close.iloc[-1])
+        def ret(days):
+            if len(close) <= days:
+                return None
+            return round((last / float(close.iloc[-days-1]) - 1) * 100, 2)
+
+        rows.append({
+            "Ticker": original,
+            "Company / ETF": assets[original],
+            "Price": round(last, 2),
+            "1M RS %": ret(21),
+            "3M RS %": ret(63),
+            "6M RS %": ret(126),
+            "12M RS %": ret(252),
+            "Stage": stage_label(close),
+            "Signal": (
+                "BUY CANDIDATE"
+                if stage_label(close) == "Stage 2" and ret(63) is not None and ret(63) > 0
+                else "WATCH"
             )
+        })
 
+    return pd.DataFrame(rows)
+
+def show_table(df):
+    if df.empty:
+        st.warning(
+            "No market data returned. Try again later, or use the CSV Import section."
+        )
+        return
+
+    st.dataframe(df, use_container_width=True, hide_index=True)
+    st.download_button(
+        "Download results as CSV",
+        data=df.to_csv(index=False).encode("utf-8"),
+        file_name="marketstrength_results.csv",
+        mime="text/csv"
+    )
+
+if page == "Master Dashboard":
+    st.subheader("Market Overview")
+    a, b, c, d = st.columns(4)
+    a.metric("Selected Market", market)
+    b.metric("Assets in Starter List", len(assets))
+    c.metric("Analysis", "1M / 3M / 6M / 12M")
+    d.metric("Updated", datetime.now().strftime("%d %b %Y"))
+
+    st.markdown("### Market Strength Scanner")
+    st.write(
+        "Compare price performance, identify Stage 2 candidates, "
+        "and review the strongest assets in the selected list."
+    )
+    df = build_market_table(assets, market)
+    show_table(df)
+
+elif page == "Sector Rotation":
+    st.subheader("Sector Rotation")
+    st.write(
+        "This starter page compares a small selection of Indian sector ETFs. "
+        "Rotation labels are based on recent price performance, not a full "
+        "benchmark-relative sector rotation model."
+    )
+    sectors = {
+        "BANKBEES.NS": "Banking",
+        "ITBEES.NS": "Information Technology",
+        "PHARMABEES.NS": "Pharma",
+        "AUTOETF.NS": "Automobile",
+        "CPSEETF.NS": "PSU / CPSE"
+    }
+    sector_df = build_market_table(sectors, "India")
+    if not sector_df.empty:
+        def rotation(row):
+            r1 = row["1M RS %"]
+            r3 = row["3M RS %"]
+            if pd.isna(r1) or pd.isna(r3):
+                return "Insufficient Data"
+            if r1 > 0 and r3 > 0:
+                return "Leading"
+            if r1 > 0 and r3 <= 0:
+                return "Improving"
+            if r1 <= 0 and r3 > 0:
+                return "Weakening"
+            return "Lagging"
+        sector_df["Rotation"] = sector_df.apply(rotation, axis=1)
+    show_table(sector_df)
+
+elif page == "Stock Scanner":
+    st.subheader("Stock Scanner")
+    st.write("Scan the starter list for positive momentum and Stage 2.")
+    df = build_market_table(assets, market)
+    if not df.empty:
+        df = df.sort_values("3M RS %", ascending=False, na_position="last")
+        show_table(df)
+
+elif page == "Stage Analysis":
+    st.subheader("Stage Analysis")
+    st.write(
+        "Approximate stage classification using price and a 150-day moving average. "
+        "This is a simplified screen, not a complete weekly-chart stage analysis."
+    )
+    df = build_market_table(assets, market)
+    if not df.empty:
+        show_table(df[["Ticker", "Company / ETF", "Price", "Stage", "Signal"]])
+
+else:
+    st.subheader("Fundamentals / Import Data")
+    st.write(
+        "Upload a CSV containing your own fundamental data. "
+        "This page does not automatically retrieve company fundamentals yet."
+    )
+
+    template = pd.DataFrame(columns=[
+        "Ticker",
+        "Company",
+        "Market Cap",
+        "Sales Growth %",
+        "Profit Growth %",
+        "ROE %",
+        "ROCE %",
+        "Debt / Equity",
+        "Promoter Pledge %",
+        "P/E"
+    ])
+
+    st.download_button(
+        "Download Fundamentals CSV Template",
+        data=template.to_csv(index=False).encode("utf-8"),
+        file_name="fundamentals_template.csv",
+        mime="text/csv"
+    )
+
+    uploaded = st.file_uploader("Upload your fundamentals CSV", type=["csv"])
+    if uploaded is not None:
+        try:
+            fundamental_df = pd.read_csv(uploaded)
+            st.success("CSV uploaded successfully.")
             st.dataframe(
-                styled,
+                fundamental_df,
                 use_container_width=True,
                 hide_index=True
             )
-
             st.download_button(
-                "Download Sector Rotation CSV",
-                sectors.to_csv(index=False).encode("utf-8"),
-                "Sector_Rotation.csv",
-                "text/csv"
+                "Download imported data",
+                data=fundamental_df.to_csv(index=False).encode("utf-8"),
+                file_name="imported_fundamentals.csv",
+                mime="text/csv"
             )
+        except Exception as exc:
+            st.error(f"Could not read this CSV: {exc}")
 
-# ---------- NIFTY 500 PAGE ----------
-
-elif menu == "Nifty 500 Scanner":
-    st.header("Nifty 500 Relative Strength Scanner")
-
-    if st.button("Load Nifty 500 & Run Scanner", type="primary"):
-        try:
-            with st.spinner("Loading Nifty 500 constituents..."):
-                universe = get_nifty500()
-
-            st.success(f"Loaded {len(universe)} stocks.")
-
-            with st.spinner("Calculating stock relative strength..."):
-                output = run_stock_scanner(
-                    tuple(universe["Symbol"].tolist())
-                )
-
-            if output.empty:
-                st.error("No usable stock price data received.")
-            else:
-                output = output.merge(
-                    universe,
-                    on="Symbol",
-                    how="left"
-                )
-
-                st.success(f"Analysed {len(output)} stocks.")
-
-                st.dataframe(
-                    output,
-                    use_container_width=True,
-                    hide_index=True
-                )
-
-                st.download_button(
-                    "Download Nifty 500 Results",
-                    output.to_csv(index=False).encode("utf-8"),
-                    "Nifty500_RS_Results.csv",
-                    "text/csv"
-                )
-
-        except Exception as error:
-            st.error("Scanner could not complete.")
-            st.code(str(error))
-
-# ---------- STAGE ANALYSIS PAGE ----------
-
-elif menu == "Stage Analysis":
-    st.header("Weinstein Stage Analysis")
-    st.caption(
-        "Weekly charts | 30-week moving average | "
-        "Green = Stage 2, Yellow = Stage 1, Orange = Stage 3, Red = Stage 4"
-    )
-
-    if st.button("Run Nifty 500 Stage Analysis", type="primary"):
-        try:
-            with st.spinner("Loading Nifty 500 universe..."):
-                universe = get_nifty500()
-
-            st.success(f"Loaded {len(universe)} stocks.")
-
-            with st.spinner(
-                "Downloading weekly prices and calculating stages. "
-                "This may take several minutes..."
-            ):
-                stages = run_stage_scanner(
-                    tuple(universe["Symbol"].tolist())
-                )
-
-            if stages.empty:
-                st.error("No usable weekly price data received.")
-            else:
-                counts = stages["Stage"].value_counts()
-
-                c1, c2, c3, c4 = st.columns(4)
-                c1.metric("Stage 1 - Basing", counts.get("Stage 1 - Basing", 0))
-                c2.metric("Stage 2 - Advancing", counts.get("Stage 2 - Advancing", 0))
-                c3.metric("Stage 3 - Topping", counts.get("Stage 3 - Topping", 0))
-                c4.metric("Stage 4 - Declining", counts.get("Stage 4 - Declining", 0))
-
-                stages = stages.merge(
-                    universe,
-                    on="Symbol",
-                    how="left"
-                )
-
-                stages = stages[
-                    ["Symbol", "Sector", "Last Price", "30-Week MA",
-                     "Price vs MA %", "MA Slope % (4 weeks)", "Stage"]
-                ]
-
-                stages = stages.sort_values(
-                    "MA Slope % (4 weeks)",
-                    ascending=False
-                )
-
-                styled = stages.style.map(
-                    colour_stage,
-                    subset=["Stage"]
-                )
-
-                st.subheader("Stage Analysis Results")
-
-                st.dataframe(
-                    styled,
-                    use_container_width=True,
-                    hide_index=True
-                )
-
-                stage2 = stages[
-                    stages["Stage"] == "Stage 2 - Advancing"
-                ]
-
-                st.subheader("Potential Stage 2 Candidates")
-                st.dataframe(
-                    stage2,
-                    use_container_width=True,
-                    hide_index=True
-                )
-
-                st.download_button(
-                    "Download Stage Analysis CSV",
-                    stages.to_csv(index=False).encode("utf-8"),
-                    "Nifty500_Stage_Analysis.csv",
-                    "text/csv"
-                )
-
-        except Exception as error:
-            st.error("Stage analysis could not complete.")
-            st.code(str(error))
-
-# ---------- MASTER DASHBOARD ----------
-
-else:
-    st.header("MarketStrength Master Dashboard")
-
-    st.markdown("""
-    ### Analysis workflow
-
-    1. Market Trend
-    2. Sector Rotation
-    3. Strong Stocks
-    4. Stage Analysis
-    5. Fundamentals
-    6. Entry Candidates
-    """)
-
-    st.markdown("""
-    ### Stage colour guide
-
-    - 🟡 Stage 1 — Basing / Accumulation
-    - 🟢 Stage 2 — Advancing / Uptrend
-    - 🟠 Stage 3 — Topping / Distribution
-    - 🔴 Stage 4 — Declining / Downtrend
-    """)
-
-    st.info(
-        "Run Sector Rotation, Nifty 500 Scanner and Stage Analysis "
-        "from the sidebar to view the current research results."
-    )
-
+st.divider()
 st.caption(
-    "MarketStrength Master Dashboard | Historical data research tool"
+    "MarketStrength starter build | Prices supplied by Yahoo Finance where available. "
+    "Data availability and ticker mappings may vary."
 )
