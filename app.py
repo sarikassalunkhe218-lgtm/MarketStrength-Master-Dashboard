@@ -153,19 +153,43 @@ def build_market_table(assets, market_name):
     if not tickers:
         return pd.DataFrame()
 
-    yf_tickers = [
-        t if t.endswith(".NS") or "." in t or market_name == "United States"
-        else t + ".NS"
-        for t in tickers
-    ]
+yf_tickers = [
+    t if t.endswith(".NS") or "." in t or market_name == "United States"
+    else t + ".NS"
+    for t in tickers
+]
 
-    with st.spinner("Downloading market prices. Please wait..."):
-        prices = get_prices(tuple(yf_tickers))
+# Download prices in smaller batches
+price_parts = []
 
-    rows = []
-    for original, ticker in zip(tickers, yf_tickers):
-        close = extract_close(prices, ticker)
-        if close.empty:
+with st.spinner("Downloading stock prices in batches..."):
+    for start in range(0, len(yf_tickers), 50):
+        batch = yf_tickers[start:start + 50]
+
+        try:
+            batch_data = yf.download(
+                tickers=batch,
+                period="2y",
+                interval="1d",
+                auto_adjust=True,
+                progress=False,
+                group_by="ticker",
+                threads=False
+            )
+
+            if not batch_data.empty:
+                price_parts.append(batch_data)
+
+        except Exception:
+            continue
+
+    if price_parts:
+        prices = pd.concat(price_parts, axis=1)
+        prices = prices.loc[:, ~prices.columns.duplicated()]
+    else:
+        prices = pd.DataFrame()
+
+   
             continue
 
         last = float(close.iloc[-1])
