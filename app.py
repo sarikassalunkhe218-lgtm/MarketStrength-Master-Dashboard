@@ -516,7 +516,9 @@ page = st.sidebar.radio(
         "Sector Strength",
         "Strong Stocks by Sector",
         "Stock Scanner",
-        "Stage Analysis"
+        "Stage Analysis",
+        "Early Leadership",
+        "Research Centre"
     ]
 )
 
@@ -840,6 +842,185 @@ elif page == "Stage Analysis":
             )
 
             show_table(stage_table, len(asset_df))
+
+
+# -------------------- EARLY LEADERSHIP --------------------
+
+elif page == "Early Leadership":
+
+    st.subheader("🚀 Early Leadership")
+    st.caption("Potential leaders and stocks showing improving relative strength.")
+
+    prices = download_prices(tuple(asset_df["Yahoo Ticker"].tolist()))
+    table = build_stock_table(asset_df, prices, benchmark_close)
+
+    if table.empty:
+        st.warning("No usable market data available.")
+    else:
+        potential = table[
+            (table["Stage"] == "Stage 2") &
+            (table["3M RS %"].notna()) &
+            (table["3M RS %"] > 0)
+        ].sort_values(["RS Score", "3M RS %"], ascending=False)
+
+        improving = table[
+            (table["Stage"].isin(["Stage 1", "Stage 2"])) &
+            (table["1M RS %"].notna()) &
+            (table["3M RS %"].notna()) &
+            (table["1M RS %"] > 0) &
+            (table["3M RS %"] > 0)
+        ].sort_values(["1M RS %", "3M RS %"], ascending=False)
+
+        st.markdown("### Potential Market Leaders — Stage 2 + Positive 3M RS")
+        show_table(potential.head(50), len(potential))
+        st.markdown("### Early Momentum Improvement — Stage 1/2 + Positive 1M and 3M RS")
+        show_table(improving.head(50), len(improving))
+
+
+# -------------------- FUNDAMENTALS + RRG RESEARCH --------------------
+
+elif page == "Research Centre":
+
+    st.subheader("🔬 Research Centre")
+    st.caption("Free Yahoo Finance fundamentals and weekly relative-rotation analysis.")
+
+    research_mode = st.radio(
+        "Research module",
+        ["Fundamentals", "RRG"],
+        horizontal=True
+    )
+
+    api_base = "https://market-strength-api.vercel.app"
+    research_assets = asset_df.head(50).copy()
+
+    if research_assets.empty:
+        st.warning("No assets are loaded for this market.")
+    else:
+        symbols = research_assets["Yahoo Ticker"].dropna().astype(str).tolist()
+
+        if market == "India" or market == "Indian ETFs":
+            research_benchmark = "^NSEI"
+        elif market == "United States":
+            research_benchmark = "^GSPC"
+        else:
+            research_benchmark = "ACWI"
+
+        st.info(
+            f"Analysing up to {len(symbols)} symbols against {research_benchmark}. "
+            "Free-data coverage varies by company and exchange."
+        )
+
+        if st.button("Load " + research_mode + " data", type="primary"):
+            try:
+                with st.spinner("Requesting research data from MarketStrength API..."):
+                    endpoint = (
+                        "/api/v1/fundamentals"
+                        if research_mode == "Fundamentals"
+                        else "/api/v1/rrg"
+                    )
+                    payload = {"symbols": symbols}
+                    if research_mode == "RRG":
+                        payload["benchmark"] = research_benchmark
+
+                    response = requests.post(
+                        api_base + endpoint,
+                        json=payload,
+                        timeout=240
+                    )
+                    response.raise_for_status()
+                    result = response.json()
+
+                rows = result.get("results", [])
+
+                if research_mode == "Fundamentals":
+                    fundamentals = pd.DataFrame(rows)
+                    if fundamentals.empty:
+                        st.warning("No fundamentals were returned.")
+                    else:
+                        preferred = [
+                            "symbol", "quality_score", "score_coverage",
+                            "market_cap", "currency",
+                            "sales_cagr_3y_pct", "sales_cagr_5y_pct",
+                            "sales_cagr_10y_pct", "profit_cagr_3y_pct",
+                            "profit_cagr_5y_pct", "profit_cagr_10y_pct",
+                            "operating_margin_pct", "roe_pct", "roce_pct",
+                            "debt_to_equity", "promoter_pledge_pct",
+                            "data_status"
+                        ]
+                        columns = [c for c in preferred if c in fundamentals.columns]
+                        fundamentals = fundamentals[columns]
+                        st.caption(result.get("method", "Yahoo Finance free-data fundamentals."))
+                        st.dataframe(
+                            fundamentals,
+                            use_container_width=True,
+                            hide_index=True
+                        )
+                        st.download_button(
+                            "Download fundamentals CSV",
+                            fundamentals.to_csv(index=False).encode("utf-8"),
+                            "marketstrength_fundamentals.csv",
+                            "text/csv"
+                        )
+                        st.warning(
+                            "N/A means the free source did not provide that field. "
+                            "Five-/ten-year growth and promoter pledge may be unavailable."
+                        )
+
+                else:
+                    rrg = pd.DataFrame([
+                        {
+                            "Ticker": item.get("symbol"),
+                            "RS-Ratio": item.get("rs_ratio"),
+                            "RS-Momentum": item.get("rs_momentum"),
+                            "Quadrant": item.get("quadrant")
+                        }
+                        for item in rows
+                    ])
+                    if rrg.empty:
+                        st.warning(
+                            "No RRG points were returned. Check ticker formats and benchmark history."
+                        )
+                    else:
+                        st.caption(result.get("method", "Weekly EMA-based RRG approximation."))
+                        st.markdown("### Relative Rotation Quadrants")
+                        quadrant_order = ["Leading", "Improving", "Weakening", "Lagging"]
+                        cols = st.columns(4)
+                        for col, quadrant in zip(cols, quadrant_order):
+                            subset = rrg[rrg["Quadrant"] == quadrant]
+                            col.metric(quadrant, len(subset))
+                        st.markdown("### RRG Scatter — centred on 100 / 100")
+                        st.scatter_chart(
+                            rrg,
+                            x="RS-Ratio",
+                            y="RS-Momentum",
+                            color="Quadrant",
+                            size=100
+                        )
+                        st.dataframe(
+                            rrg.sort_values(
+                                ["Quadrant", "RS-Ratio"],
+                                ascending=[True, False]
+                            ),
+                            use_container_width=True,
+                            hide_index=True
+                        )
+                        st.download_button(
+                            "Download RRG CSV",
+                            rrg.to_csv(index=False).encode("utf-8"),
+                            "marketstrength_rrg.csv",
+                            "text/csv"
+                        )
+                        errors = result.get("errors", [])
+                        if errors:
+                            st.caption("No RRG history returned for: " + ", ".join(errors[:30]))
+            except requests.RequestException as error:
+                st.error(
+                    "The research API could not be reached. Please try again shortly. "
+                    f"Details: {error}"
+                )
+            except Exception as error:
+                st.error(f"Could not display research data: {error}")
+
 
 # -------------------- FOOTER --------------------
 
