@@ -470,7 +470,12 @@ def style_dashboard(df):
     return styled
 
 
+show_table_counter = 0
+
+
 def show_table(df, total=None):
+    global show_table_counter
+    show_table_counter += 1
 
     if df.empty:
         st.warning("No usable price data found. Please refresh later.")
@@ -491,7 +496,8 @@ def show_table(df, total=None):
         "Download CSV",
         df.to_csv(index=False).encode("utf-8"),
         file_name="marketstrength_results.csv",
-        mime="text/csv"
+        mime="text/csv",
+        key=f"marketstrength_csv_download_{show_table_counter}"
     )
 
 
