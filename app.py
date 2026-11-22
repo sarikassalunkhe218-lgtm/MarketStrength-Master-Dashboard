@@ -993,8 +993,7 @@ elif page == "Research Centre":
                             rrg,
                             x="RS-Ratio",
                             y="RS-Momentum",
-                            color="Quadrant",
-                            size=100
+                            color="Quadrant"
                         )
                         st.dataframe(
                             rrg.sort_values(
