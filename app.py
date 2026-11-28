@@ -524,6 +524,7 @@ page = st.sidebar.radio(
         "Stock Scanner",
         "Stage Analysis",
         "Early Leadership",
+        "SARIKA Multi-Factor V4",
         "Research Centre"
     ]
 )
@@ -881,6 +882,120 @@ elif page == "Early Leadership":
         show_table(potential.head(50), len(potential))
         st.markdown("### Early Momentum Improvement — Stage 1/2 + Positive 1M and 3M RS")
         show_table(improving.head(50), len(improving))
+
+
+
+
+# -------------------- SARIKA MULTI-FACTOR V4 --------------------
+
+elif page == "SARIKA Multi-Factor V4":
+
+    st.subheader("🧭 SARIKA Multi-Factor Trend System V4")
+    st.caption("V4 technical + fundamental scoring, MarketStrength relative strength and sector rotation filters.")
+
+    api_base = "https://market-strength-api.vercel.app"
+    c1, c2, c3 = st.columns(3)
+    min_technical = c1.slider("Minimum Technical Score", 0, 100, 70, 5)
+    min_fundamental = c2.slider("Minimum Fundamental Score", 0, 100, 60, 5)
+    min_rs = c3.slider("Minimum 3M Relative Strength (%)", -50.0, 50.0, 0.0, 1.0)
+    stage_choice = st.selectbox("Weinstein Stage", ["All stages", "Stage 1", "Stage 2", "Stage 3", "Stage 4"])
+    sector_options = sorted(asset_df["Industry"].dropna().astype(str).unique()) if "Industry" in asset_df.columns else []
+    selected_sectors = st.multiselect("Sector strength filter", sector_options, default=[])
+
+    st.info("The V4 scan uses Yahoo Finance daily OHLC and available quarterly/annual financial data. Missing fundamental fields remain unavailable and are not counted as failures.")
+
+    if st.button("Run SARIKA V4 Screener", type="primary", disabled=asset_df.empty):
+        symbols = asset_df["Yahoo Ticker"].dropna().astype(str).tolist()
+        benchmark_symbol = (
+            "^NSEI" if market in ["India", "Indian ETFs"]
+            else "^GSPC" if market == "United States"
+            else "ACWI"
+        )
+        all_rows = []
+        sector_rows = []
+        failures = []
+        try:
+            with st.spinner(f"Running V4 analysis for {len(symbols)} instruments. This may take a few minutes..."):
+                for start in range(0, len(symbols), 50):
+                    batch = symbols[start:start + 50]
+                    response = requests.post(
+                        api_base + "/api/v1/multifactor",
+                        json={
+                            "symbols": batch,
+                            "benchmark": benchmark_symbol,
+                            "min_technical_score": 0,
+                            "min_fundamental_score": 0,
+                            "min_rs_3m": -1000,
+                            "stage": None,
+                            "sectors": []
+                        },
+                        timeout=240
+                    )
+                    response.raise_for_status()
+                    payload = response.json()
+                    all_rows.extend(payload.get("results", []))
+                    if not sector_rows:
+                        sector_rows = payload.get("sectors", [])
+                    failures.extend(payload.get("errors", []))
+
+            result_df = pd.DataFrame(all_rows)
+            if result_df.empty:
+                st.warning("No V4 results were returned. Check data availability and try again.")
+            else:
+                def rs3_value(row):
+                    rs = row.get("relative_strength_pct")
+                    return rs.get("3M") if isinstance(rs, dict) else None
+
+                result_df["RS 3M %"] = result_df.apply(rs3_value, axis=1)
+                result_df["Technical Score"] = pd.to_numeric(result_df.get("technical_score"), errors="coerce")
+                result_df["Fundamental Score"] = pd.to_numeric(result_df.get("fundamental_score"), errors="coerce")
+                result_df["Stage Label"] = result_df.get("stage_name", "N/A")
+                result_df["Sector"] = result_df.get("sector", "Unclassified")
+                result_df["Signal"] = result_df.get("signal", "WATCH")
+
+                filtered = result_df[
+                    (result_df["Technical Score"] >= min_technical) &
+                    (result_df["Fundamental Score"] >= min_fundamental) &
+                    (result_df["RS 3M %"] >= min_rs)
+                ].copy()
+                if stage_choice != "All stages":
+                    filtered = filtered[filtered["Stage Label"] == stage_choice.replace("Stage ", "")]
+                    # stage_name is descriptive, so use the numeric stage below.
+                    filtered = result_df[
+                        (result_df["Technical Score"] >= min_technical) &
+                        (result_df["Fundamental Score"] >= min_fundamental) &
+                        (result_df["RS 3M %"] >= min_rs) &
+                        (pd.to_numeric(result_df.get("stage"), errors="coerce") == int(stage_choice[-1]))
+                    ].copy()
+                if selected_sectors:
+                    filtered = filtered[filtered["Sector"].isin(selected_sectors)]
+
+                a, b, c, d = st.columns(4)
+                a.metric("Instruments analysed", len(result_df))
+                b.metric("Matched filters", len(filtered))
+                c.metric("Stage 2", int((pd.to_numeric(result_df.get("stage"), errors="coerce") == 2).sum()))
+                d.metric("Strong sectors", sum(s.get("rotation") == "Leading" for s in sector_rows))
+
+                st.markdown("### Multi-Factor Leaders")
+                preferred = ["symbol", "sector", "stage", "technical_score", "fundamental_score", "relative_strength_pct", "adx", "roe_pct", "roce_pct", "sales_yoy_pct", "profit_yoy_pct", "eps_yoy_pct", "pe_ttm", "signal", "fundamental_status"]
+                view = filtered[[c for c in preferred if c in filtered.columns]].copy()
+                st.dataframe(view, use_container_width=True, hide_index=True)
+                st.download_button("Download V4 screening CSV", view.to_csv(index=False).encode("utf-8"), "sarika_multifactor_v4.csv", "text/csv")
+
+                st.markdown("### Sector Strength & Rotation")
+                if sector_rows:
+                    sector_df = pd.DataFrame(sector_rows)
+                    st.dataframe(sector_df, use_container_width=True, hide_index=True)
+                else:
+                    st.warning("Sector strength data is not available for this market.")
+
+                st.markdown("### Factor diagnostics")
+                st.caption("Technical score: five 20-point factors (ADX, Adaptive RSI direction, PSAR/VSTOP position, EMA alignment, Stage 2). Fundamental score: ROE 18, ROCE 18, sales growth 18, profit growth 18, EPS growth 18, P/E 10; score is normalized only over available factors.")
+                if failures:
+                    st.caption(f"Price history unavailable for {len(set(failures))} symbols: {', '.join(sorted(set(failures))[:20])}")
+                st.warning("The backend uses Python approximations for TradingView PSAR/ADX/Adaptive RSI. Compare selected symbols with TradingView before relying on the scores. Free-source financial coverage varies.")
+        except Exception as error:
+            st.error(f"V4 screening failed: {error}")
 
 
 # -------------------- FUNDAMENTALS + RRG RESEARCH --------------------
