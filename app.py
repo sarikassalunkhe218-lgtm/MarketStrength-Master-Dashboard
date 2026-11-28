@@ -901,11 +901,23 @@ elif page == "SARIKA Multi-Factor V4":
     stage_choice = st.selectbox("Weinstein Stage", ["All stages", "Stage 1", "Stage 2", "Stage 3", "Stage 4"])
     sector_options = sorted(asset_df["Industry"].dropna().astype(str).unique()) if "Industry" in asset_df.columns else []
     selected_sectors = st.multiselect("Sector strength filter", sector_options, default=[])
+    scan_choice = st.selectbox(
+        "Scan universe size",
+        ["First 50 (quick test)", "First 100", "Full selected market"],
+        index=0
+    )
+    include_fundamentals = st.checkbox(
+        "Include slower fundamental analysis",
+        value=False,
+        help="Off = faster technical + RS + sector scan. Turn on to fetch financial data for each symbol."
+    )
 
-    st.info("The V4 scan uses Yahoo Finance daily OHLC and available quarterly/annual financial data. Missing fundamental fields remain unavailable and are not counted as failures.")
+    st.info("For a reliable first run, start with 50 symbols. Fast mode skips per-stock financial downloads but keeps technical, Stage, RS and sector analysis.")
 
     if st.button("Run SARIKA V4 Screener", type="primary", disabled=asset_df.empty):
-        symbols = asset_df["Yahoo Ticker"].dropna().astype(str).tolist()
+        all_symbols = asset_df["Yahoo Ticker"].dropna().astype(str).tolist()
+        scan_limit = 50 if scan_choice.startswith("First 50") else 100 if scan_choice.startswith("First 100") else len(all_symbols)
+        symbols = all_symbols[:scan_limit]
         benchmark_symbol = (
             "^NSEI" if market in ["India", "Indian ETFs"]
             else "^GSPC" if market == "United States"
@@ -914,10 +926,16 @@ elif page == "SARIKA Multi-Factor V4":
         all_rows = []
         sector_rows = []
         failures = []
+        progress = st.progress(0, text=f"Preparing scan of {len(symbols)} symbols...")
         try:
-            with st.spinner(f"Running V4 analysis for {len(symbols)} instruments. This may take a few minutes..."):
-                for start in range(0, len(symbols), 50):
+            with st.spinner(f"Running V4 analysis for {len(symbols)} instruments..."):
+                batches = list(range(0, len(symbols), 50))
+                for batch_index, start in enumerate(batches):
                     batch = symbols[start:start + 50]
+                    progress.progress(
+                        batch_index / max(1, len(batches)),
+                        text=f"Analysing batch {batch_index + 1} of {len(batches)} ({len(batch)} symbols)..."
+                    )
                     response = requests.post(
                         api_base + "/api/v1/multifactor",
                         json={
@@ -927,7 +945,8 @@ elif page == "SARIKA Multi-Factor V4":
                             "min_fundamental_score": 0,
                             "min_rs_3m": -1000,
                             "stage": None,
-                            "sectors": []
+                            "sectors": [],
+                            "include_fundamentals": include_fundamentals
                         },
                         timeout=240
                     )
@@ -937,6 +956,7 @@ elif page == "SARIKA Multi-Factor V4":
                     if not sector_rows:
                         sector_rows = payload.get("sectors", [])
                     failures.extend(payload.get("errors", []))
+                progress.progress(1.0, text=f"Scan complete: {len(all_rows)} results received.")
 
             result_df = pd.DataFrame(all_rows)
             if result_df.empty:
@@ -953,20 +973,24 @@ elif page == "SARIKA Multi-Factor V4":
                 result_df["Sector"] = result_df.get("sector", "Unclassified")
                 result_df["Signal"] = result_df.get("signal", "WATCH")
 
-                filtered = result_df[
+                base_mask = (
                     (result_df["Technical Score"] >= min_technical) &
-                    (result_df["Fundamental Score"] >= min_fundamental) &
                     (result_df["RS 3M %"] >= min_rs)
-                ].copy()
+                )
+                if include_fundamentals:
+                    base_mask &= result_df["Fundamental Score"] >= min_fundamental
+                filtered = result_df[base_mask].copy()
                 if stage_choice != "All stages":
                     filtered = filtered[filtered["Stage Label"] == stage_choice.replace("Stage ", "")]
                     # stage_name is descriptive, so use the numeric stage below.
-                    filtered = result_df[
+                    stage_mask = (
                         (result_df["Technical Score"] >= min_technical) &
-                        (result_df["Fundamental Score"] >= min_fundamental) &
                         (result_df["RS 3M %"] >= min_rs) &
                         (pd.to_numeric(result_df.get("stage"), errors="coerce") == int(stage_choice[-1]))
-                    ].copy()
+                    )
+                    if include_fundamentals:
+                        stage_mask &= result_df["Fundamental Score"] >= min_fundamental
+                    filtered = result_df[stage_mask].copy()
                 if selected_sectors:
                     filtered = filtered[filtered["Sector"].isin(selected_sectors)]
 
@@ -991,6 +1015,8 @@ elif page == "SARIKA Multi-Factor V4":
 
                 st.markdown("### Factor diagnostics")
                 st.caption("Technical score: five 20-point factors (ADX, Adaptive RSI direction, PSAR/VSTOP position, EMA alignment, Stage 2). Fundamental score: ROE 18, ROCE 18, sales growth 18, profit growth 18, EPS growth 18, P/E 10; score is normalized only over available factors.")
+                if not include_fundamentals:
+                    st.info("Fast scan mode: fundamental downloads were skipped. Enable the checkbox and rerun when you want slower fundamental scoring.")
                 if failures:
                     st.caption(f"Price history unavailable for {len(set(failures))} symbols: {', '.join(sorted(set(failures))[:20])}")
                 st.warning("The backend uses Python approximations for TradingView PSAR/ADX/Adaptive RSI. Compare selected symbols with TradingView before relying on the scores. Free-source financial coverage varies.")
